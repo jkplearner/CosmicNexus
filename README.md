@@ -72,6 +72,3 @@ The output will be in the `dist` folder, ready for deployment to Vercel, Netlify
 -   **Click Object**: Select planet/star for details
 -   **UI Controls**: Pause simulation, adjust speed, toggle chat.
 
-## License 📄
-
-MIT License.
