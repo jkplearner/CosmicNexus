@@ -6,7 +6,7 @@
 
 -   **Interactive 3D Solar System**: Explore the Sun, planets, and Voyagers in a high-performance WebGL environment.
 -   **Helical Movement**: Visualize the solar system's true motion through the Milky Way.
--   **Nexus AI Guide**: Chat with "Nexus," an onboard AI assistant powered by Google Gemini, for space facts and cosmic lore.
+-   **Nexus AI Guide**: Chat with "Nexus," an onboard AI assistant powered by Groq, for space facts and cosmic lore.
 -   **Real-time Analysis**: Click on any celestial body to get a generated scientific summary.
 -   **Cinematic Effects**: Includes bloom, starfields, and procedural textures for a premium visual experience.
 
@@ -15,7 +15,7 @@
 -   **Frontend**: React 19, Vite
 -   **3D Engine**: Three.js, React Three Fiber ecosystem (via raw Three.js)
 -   **Styling**: Tailwind CSS
--   **AI**: Google Gemini API
+-   **AI**: Groq Chat Completions API
 -   **Icons**: Lucide React
 
 ## Getting Started 🏁
@@ -40,12 +40,12 @@
 
 3.  Set up Environment Variables:
     -   Create a `.env` file in the root directory.
-    -   Add your Gemini API key:
+    -   Add your Groq API key:
         ```env
-        VITE_API_KEY=your_gemini_api_key_here
+        VITE_GROQ_API_KEY=your_groq_api_key_here
         ```
 
-    > **Security Note**: This is a client-side application. The API key is embedded in the build. Do not use a production key with unlimited quota. Set up API key restrictions (referrer/IP) in your Google Cloud Console to prevent unauthorized usage.
+    > **Security Note**: This is a client-side application. The API key is embedded in the build. Do not use a production key with unlimited quota. Set up API key restrictions (referrer/IP) in your Groq dashboard to prevent unauthorized usage.
 
 4.  Run the development server:
     ```bash
@@ -71,4 +71,5 @@ The output will be in the `dist` folder, ready for deployment to Vercel, Netlify
 -   **Scroll**: Zoom In/Out
 -   **Click Object**: Select planet/star for details
 -   **UI Controls**: Pause simulation, adjust speed, toggle chat.
+
 

@@ -5,596 +5,15 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
-import { Play, Pause, RotateCcw, Sparkles, X, Loader2, Info, MessageSquare, Send, Bot, MapPin } from 'lucide-react';
+import { Play, Pause, RotateCcw, Sparkles, X, Loader2, Info, MessageSquare, Send, Bot, MapPin, Rocket, Trophy } from 'lucide-react';
 
-/* --- CONFIGURATION --- */
-const apiKey = import.meta.env.VITE_API_KEY;
-const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) || window.innerWidth < 800;
+import { CONFIG, isMobile } from './config';
+import LensingShader from './shaders/LensingShader';
+import TextureFactory from './utils/TextureFactory';
+import GargantuaBlackHole from './classes/BlackHole';
+import Galaxy from './classes/Galaxy';
 
-const CONFIG = {
-  // Galaxy Constants
-  galaxyScale: 120000,
-  starCount: isMobile ? 40000 : 120000,
-  // Distance: We scale this for visual feasibility. 
-  // Real scale: Sun is ~26k ly from center. Galaxy radius ~50k ly.
-  solarSystemDistance: 45000,
-
-  // Solar System Constants
-  solarSystemScale: 1, // Keep local scale 1:1 for physics
-  sunSize: 12,
-  inclination: 60, // The 60 degree tilt of the ecliptic relative to galactic plane
-
-  trailLength: isMobile ? 30 : 60,
-  asteroidCount: isMobile ? 1000 : 5000,
-  geometrySegments: isMobile ? 32 : 64,
-  textureSize: isMobile ? 256 : 1024,
-  antialias: !isMobile
-};
-
-/* --- UTILS --- */
-class SimplexNoise {
-  constructor() {
-    this.grad3 = [[1, 1, 0], [-1, 1, 0], [1, -1, 0], [-1, -1, 0], [1, 0, 1], [-1, 0, 1], [1, 0, -1], [-1, 0, -1], [0, 1, 1], [0, -1, 1], [0, 1, -1], [0, -1, -1]];
-    this.p = [];
-    for (let i = 0; i < 256; i++) this.p[i] = Math.floor(Math.random() * 256);
-    this.perm = [];
-    for (let i = 0; i < 512; i++) this.perm[i] = this.p[i & 255];
-  }
-  dot(g, x, y) { return g[0] * x + g[1] * y; }
-  noise(xin, yin) {
-    let n0, n1, n2;
-    const F2 = 0.5 * (Math.sqrt(3.0) - 1.0);
-    const s = (xin + yin) * F2;
-    const i = Math.floor(xin + s);
-    const j = Math.floor(yin + s);
-    const G2 = (3.0 - Math.sqrt(3.0)) / 6.0;
-    const t = (i + j) * G2;
-    const X0 = i - t;
-    const Y0 = j - t;
-    const x0 = xin - X0;
-    const y0 = yin - Y0;
-    let i1, j1;
-    if (x0 > y0) { i1 = 1; j1 = 0; } else { i1 = 0; j1 = 1; }
-    const x1 = x0 - i1 + G2;
-    const y1 = y0 - j1 + G2;
-    const x2 = x0 - 1.0 + 2.0 * G2;
-    const y2 = y0 - 1.0 + 2.0 * G2;
-    const ii = i & 255;
-    const jj = j & 255;
-    const gi0 = this.perm[ii + this.perm[jj]] % 12;
-    const gi1 = this.perm[ii + i1 + this.perm[jj + j1]] % 12;
-    const gi2 = this.perm[ii + 1 + this.perm[jj + 1]] % 12;
-    let t0 = 0.5 - x0 * x0 - y0 * y0;
-    if (t0 < 0) n0 = 0.0;
-    else { t0 *= t0; n0 = t0 * t0 * this.dot(this.grad3[gi0], x0, y0); }
-    let t1 = 0.5 - x1 * x1 - y1 * y1;
-    if (t1 < 0) n1 = 0.0;
-    else { t1 *= t1; n1 = t1 * t1 * this.dot(this.grad3[gi1], x1, y1); }
-    let t2 = 0.5 - x2 * x2 - y2 * y2;
-    if (t2 < 0) n2 = 0.0;
-    else { t2 *= t2; n2 = t2 * t2 * this.dot(this.grad3[gi2], x2, y2); }
-    return 70.0 * (n0 + n1 + n2);
-  }
-}
-const noiseGen = new SimplexNoise();
-
-/* --- SHADERS --- */
-const LensingShader = {
-  uniforms: {
-    "tDiffuse": { value: null },
-    "blackHoleScreenPos": { value: new THREE.Vector2(0.5, 0.5) },
-    "lensingStrength": { value: 0.14 },
-    "lensingRadius": { value: 0.32 },
-    "aspectRatio": { value: 1.0 },
-    "chromaticAberration": { value: 0.006 }
-  },
-  vertexShader: `
-    varying vec2 vUv; 
-    void main() { 
-      vUv = uv; 
-      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); 
-    }`,
-  fragmentShader: `
-    uniform sampler2D tDiffuse;
-    uniform vec2 blackHoleScreenPos;
-    uniform float lensingStrength;
-    uniform float lensingRadius;
-    uniform float aspectRatio;
-    uniform float chromaticAberration;
-    varying vec2 vUv;
-    void main() {
-      vec2 screenPos = vUv;
-      vec2 toCenter = screenPos - blackHoleScreenPos;
-      toCenter.x *= aspectRatio;
-      float dist = length(toCenter);
-      float distortionAmount = lensingStrength / (dist * dist + 0.01);
-      distortionAmount = clamp(distortionAmount, 0.0, 0.5); 
-      float falloff = smoothstep(lensingRadius, 0.0, dist);
-      distortionAmount *= falloff; 
-      vec2 offset = normalize(toCenter) * distortionAmount;
-      offset.x /= aspectRatio;
-      vec2 distortedUvR = screenPos - offset * (1.0 + chromaticAberration);
-      vec2 distortedUvG = screenPos - offset;
-      vec2 distortedUvB = screenPos - offset * (1.0 - chromaticAberration);
-      float r = texture2D(tDiffuse, distortedUvR).r;
-      float g = texture2D(tDiffuse, distortedUvG).g;
-      float b = texture2D(tDiffuse, distortedUvB).b;
-      gl_FragColor = vec4(r, g, b, 1.0);
-    }`
-};
-
-const DiskShader = {
-  vertex: `
-    varying vec2 vUv;
-    varying float vRadius;
-    varying float vAngle;
-    varying vec3 vWorldPosition;
-    void main() {
-      vUv = uv;
-      vRadius = length(position.xy);
-      vAngle = atan(position.y, position.x);
-      vWorldPosition = (modelMatrix * vec4(position, 1.0)).xyz;
-      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-    }
-  `,
-  fragment: `
-    uniform float uTime;
-    uniform vec3 uColorHot;
-    uniform vec3 uColorMid1;
-    uniform vec3 uColorMid2;
-    uniform vec3 uColorMid3;
-    uniform vec3 uColorOuter;
-    uniform float uNoiseScale;
-    uniform float uFlowSpeed;
-    uniform float uDensity;
-    uniform vec3 uCameraPosition;
-    varying vec2 vUv;
-    varying float vRadius;
-    varying float vAngle;
-    varying vec3 vWorldPosition;
-
-    vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
-    vec4 mod289(vec4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
-    vec4 permute(vec4 x) { return mod289(((x*34.0)+1.0)*x); }
-    vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
-    float snoise(vec3 v) {
-      const vec2 C = vec2(1.0/6.0, 1.0/3.0);
-      const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
-      vec3 i  = floor(v + dot(v, C.yyy) );
-      vec3 x0 = v - i + dot(i, C.xxx) ;
-      vec3 g = step(x0.yzx, x0.xyz);
-      vec3 l = 1.0 - g;
-      vec3 i1 = min( g.xyz, l.zxy );
-      vec3 i2 = max( g.xyz, l.zxy );
-      vec3 x1 = x0 - i1 + C.xxx;
-      vec3 x2 = x0 - i2 + C.yyy;
-      vec3 x3 = x0 - D.yyy;
-      i = mod289(i);
-      vec4 p = permute( permute( permute( i.z + vec4(0.0, i1.z, i2.z, 1.0 )) + i.y + vec4(0.0, i1.y, i2.y, 1.0 )) + i.x + vec4(0.0, i1.x, i2.x, 1.0 ));
-      float n_ = 0.142857142857;
-      vec3  ns = n_ * D.wyz - D.xzx;
-      vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
-      vec4 x_ = floor(j * ns.z);
-      vec4 y_ = floor(j - 7.0 * x_ );
-      vec4 x = x_ *ns.x + ns.yyyy;
-      vec4 y = y_ *ns.x + ns.yyyy;
-      vec4 h = 1.0 - abs(x) - abs(y);
-      vec4 b0 = vec4( x.xy, y.xy );
-      vec4 b1 = vec4( x.zw, y.zw );
-      vec4 s0 = floor(b0)*2.0 + 1.0;
-      vec4 s1 = floor(b1)*2.0 + 1.0;
-      vec4 sh = -step(h, vec4(0.0));
-      vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy ;
-      vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww ;
-      vec3 p0 = vec3(a0.xy,h.x);
-      vec3 p1 = vec3(a0.zw,h.y);
-      vec3 p2 = vec3(a1.xy,h.z);
-      vec3 p3 = vec3(a1.zw,h.w);
-      vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2,p2), dot(p3,p3)));
-      p0 *= norm.x; p1 *= norm.y; p2 *= norm.z; p3 *= norm.w;
-      vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
-      m = m * m;
-      return 42.0 * dot( m*m, vec4( dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3) ) );
-    }
-
-    void main() {
-      float normalizedRadius = smoothstep(1.50, 8.00, vRadius);
-      float spiral = vAngle * 3.5 - (1.0 / (normalizedRadius + 0.05)) * 3.0;
-      vec2 noiseUv = vec2(vUv.x + uTime * uFlowSpeed * (2.0 / (vRadius * 0.4 + 0.5)) + sin(spiral) * 0.15, vUv.y * 0.7 + cos(spiral) * 0.15);
-      float noiseVal = snoise(vec3(noiseUv * uNoiseScale, uTime * 0.2));
-      noiseVal = (noiseVal + 1.0) * 0.5;
-      vec3 color = uColorOuter;
-      color = mix(color, uColorMid3, smoothstep(0.0, 0.3, normalizedRadius));
-      color = mix(color, uColorMid2, smoothstep(0.25, 0.6, normalizedRadius));
-      color = mix(color, uColorMid1, smoothstep(0.55, 0.85, normalizedRadius));
-      color = mix(color, uColorHot, smoothstep(0.8, 0.98, normalizedRadius));
-      color *= (0.4 + noiseVal * 1.3);
-      float brightness = pow(1.0 - normalizedRadius, 1.2) * 4.0 + 0.3;
-      brightness *= (0.4 + noiseVal * 2.5);
-      vec3 viewDir = normalize(uCameraPosition - vWorldPosition);
-      vec3 diskTangent = normalize(cross(vec3(0.0, 1.0, 0.0), vWorldPosition));
-      float doppler = dot(viewDir, diskTangent);
-      brightness *= (1.0 + doppler * 0.6);
-      color = mix(color, color * vec3(1.1, 1.05, 1.0), smoothstep(0.0, 0.5, doppler)); 
-      color = mix(color, color * vec3(1.0, 0.9, 0.8), smoothstep(0.0, -0.5, doppler)); 
-      float pulse = sin(uTime * 2.0 + normalizedRadius * 15.0 + vAngle * 3.0) * 0.1 + 0.9;
-      brightness *= pulse;
-      float alpha = uDensity * (0.1 + noiseVal * 0.9);
-      alpha *= smoothstep(0.0, 0.08, normalizedRadius);
-      alpha *= (1.0 - smoothstep(0.9, 1.0, normalizedRadius));
-      alpha = clamp(alpha, 0.0, 1.0);
-      gl_FragColor = vec4(color * brightness, alpha);
-    }
-  `
-};
-
-const HorizonShader = {
-  vertex: `
-    varying vec3 vNormal;
-    varying vec3 vPosition;
-    void main() {
-      vNormal = normalize(normalMatrix * normal);
-      vPosition = position;
-      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-    }
-  `,
-  fragment: `
-    uniform float uTime;
-    uniform vec3 uCameraPosition;
-    varying vec3 vNormal;
-    varying vec3 vPosition;
-    void main() {
-      vec3 viewDirection = normalize(uCameraPosition - vPosition);
-      float fresnel = 1.0 - abs(dot(vNormal, viewDirection));
-      fresnel = pow(fresnel, 4.0);
-      vec3 glowColor = vec3(1.0, 0.7, 0.4);
-      float pulse = sin(uTime * 2.0) * 0.1 + 0.9;
-      float noise = sin(vPosition.x * 10.0 + uTime) * sin(vPosition.y * 10.0 - uTime) * 0.1;
-      gl_FragColor = vec4(glowColor * (fresnel + noise) * pulse * 1.5, fresnel * 0.8);
-    }
-  `
-};
-
-/* --- FACTORIES --- */
-class TextureFactory {
-  // Existing Solar System Textures
-  static create(type, c1, c2) {
-    const size = CONFIG.textureSize;
-    const canvas = document.createElement('canvas');
-    canvas.width = size; canvas.height = size;
-    const ctx = canvas.getContext('2d');
-    const imgData = ctx.createImageData(size, size);
-    const data = imgData.data;
-
-    // Helper to mix colors
-    const hexToRgb = (hex) => {
-      const bigint = parseInt(hex.replace('#', ''), 16);
-      return [(bigint >> 16) & 255, (bigint >> 8) & 255, bigint & 255];
-    };
-    const col1 = hexToRgb(c1);
-    const col2 = hexToRgb(c2);
-
-    if (type === 'gas') {
-      const scale = 0.02;
-      for (let y = 0; y < size; y++) {
-        for (let x = 0; x < size; x++) {
-          let n = noiseGen.noise(x * scale * 0.2, y * scale);
-          n += 0.5 * noiseGen.noise(x * scale, y * scale * 5.0);
-          const distY = y + n * 50;
-          const band = Math.sin(distY * 0.05);
-          const t = (band + 1) / 2;
-          const idx = (y * size + x) * 4;
-          data[idx] = col1[0] * t + col2[0] * (1 - t);
-          data[idx + 1] = col1[1] * t + col2[1] * (1 - t);
-          data[idx + 2] = col1[2] * t + col2[2] * (1 - t);
-          data[idx + 3] = 255;
-        }
-      }
-      ctx.putImageData(imgData, 0, 0);
-      ctx.globalCompositeOperation = 'overlay';
-      ctx.fillStyle = 'rgba(255,255,255,0.05)';
-      for (let i = 0; i < 20; i++) {
-        const y = Math.random() * size;
-        const h = Math.random() * size * 0.1;
-        ctx.fillRect(0, y, size, h);
-      }
-    } else if (type === 'rocky') {
-      const scale = 0.015;
-      for (let y = 0; y < size; y++) {
-        for (let x = 0; x < size; x++) {
-          let n = noiseGen.noise(x * scale, y * scale);
-          n += 0.5 * noiseGen.noise(x * scale * 4, y * scale * 4);
-          const v = Math.abs(n);
-          const t = Math.min(1, Math.max(0, v));
-          const idx = (y * size + x) * 4;
-          data[idx] = col1[0] * t + col2[0] * (1 - t);
-          data[idx + 1] = col1[1] * t + col2[1] * (1 - t);
-          data[idx + 2] = col1[2] * t + col2[2] * (1 - t);
-          data[idx + 3] = 255;
-        }
-      }
-      ctx.putImageData(imgData, 0, 0);
-      ctx.globalCompositeOperation = 'multiply';
-      for (let i = 0; i < 50; i++) {
-        const cx = Math.random() * size;
-        const cy = Math.random() * size;
-        const r = Math.random() * size * 0.05;
-        const g = ctx.createRadialGradient(cx, cy, r * 0.8, cx, cy, r);
-        g.addColorStop(0, 'rgba(0,0,0,0.4)');
-        g.addColorStop(1, 'rgba(0,0,0,0)');
-        ctx.fillStyle = g;
-        ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
-      }
-    } else if (type === 'sun') {
-      const scale = 0.02;
-      for (let y = 0; y < size; y++) {
-        for (let x = 0; x < size; x++) {
-          let n = noiseGen.noise(x * scale, y * scale);
-          n += 0.5 * noiseGen.noise(x * scale * 4, y * scale * 4);
-          const t = (n + 1) / 2;
-          const idx = (y * size + x) * 4;
-          data[idx] = col1[0] * t + col2[0] * (1 - t);
-          data[idx + 1] = col1[1] * t + col2[1] * (1 - t);
-          data[idx + 2] = col1[2] * t + col2[2] * (1 - t);
-          data[idx + 3] = 255;
-        }
-      }
-      ctx.putImageData(imgData, 0, 0);
-      const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
-      g.addColorStop(0, 'rgba(255,255,255,0.8)');
-      g.addColorStop(1, 'rgba(255,255,0,0)');
-      ctx.fillStyle = g; ctx.fillRect(0, 0, size, size);
-    } else if (type === 'glow') {
-      ctx.clearRect(0, 0, size, size);
-      const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
-      g.addColorStop(0, c1);
-      g.addColorStop(0.4, c2);
-      g.addColorStop(1, 'rgba(0,0,0,0)');
-      ctx.fillStyle = g; ctx.fillRect(0, 0, size, size);
-    }
-    return new THREE.CanvasTexture(canvas);
-  }
-
-  // Galaxy Textures
-  static getGlowTexture() {
-    if (this._glowTex) return this._glowTex;
-    const canvas = document.createElement('canvas');
-    canvas.width = 128; canvas.height = 128;
-    const ctx = canvas.getContext('2d');
-    const grad = ctx.createRadialGradient(64, 64, 0, 64, 64, 64);
-    grad.addColorStop(0, 'rgba(255,255,255,1)');
-    grad.addColorStop(0.2, 'rgba(255,255,255,0.8)');
-    grad.addColorStop(0.5, 'rgba(255,255,255,0.2)');
-    grad.addColorStop(1.0, 'rgba(0,0,0,0)');
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, 128, 128);
-    this._glowTex = new THREE.CanvasTexture(canvas);
-    return this._glowTex;
-  }
-
-  static getStarTexture() {
-    if (this._starTex) return this._starTex;
-    const canvas = document.createElement('canvas');
-    canvas.width = 32; canvas.height = 32;
-    const ctx = canvas.getContext('2d');
-    const grad = ctx.createRadialGradient(16, 16, 0, 16, 16, 16);
-    grad.addColorStop(0, 'rgba(255,255,255,1)');
-    grad.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, 32, 32);
-    this._starTex = new THREE.CanvasTexture(canvas);
-    return this._starTex;
-  }
-}
-
-/* --- CLASSES --- */
-class GargantuaBlackHole {
-  constructor(scene, pos, scale) {
-    this.group = new THREE.Group();
-    this.group.position.copy(pos);
-    this.group.scale.set(scale, scale, scale);
-    scene.add(this.group);
-
-    const BLACK_HOLE_RADIUS = 1.3;
-    const DISK_INNER_RADIUS = BLACK_HOLE_RADIUS + 0.1;
-    const DISK_OUTER_RADIUS = 7.0;
-
-    const bhGeo = new THREE.SphereGeometry(BLACK_HOLE_RADIUS, 64, 64);
-    const bhMat = new THREE.MeshBasicMaterial({ color: 0x000000 });
-    this.core = new THREE.Mesh(bhGeo, bhMat);
-    this.group.add(this.core);
-
-    const ehGeo = new THREE.SphereGeometry(BLACK_HOLE_RADIUS * 1.02, 64, 64);
-    this.ehMat = new THREE.ShaderMaterial({
-      uniforms: {
-        uTime: { value: 0 },
-        uCameraPosition: { value: new THREE.Vector3() }
-      },
-      vertexShader: HorizonShader.vertex,
-      fragmentShader: HorizonShader.fragment,
-      transparent: true,
-      blending: THREE.AdditiveBlending,
-      side: THREE.BackSide,
-      depthWrite: false
-    });
-    const ehMesh = new THREE.Mesh(ehGeo, this.ehMat);
-    this.group.add(ehMesh);
-
-    const diskGeo = new THREE.RingGeometry(DISK_INNER_RADIUS, DISK_OUTER_RADIUS, 128, 64);
-    this.diskMat = new THREE.ShaderMaterial({
-      uniforms: {
-        uTime: { value: 0.0 },
-        uColorHot: { value: new THREE.Color(0xffffff) },
-        uColorMid1: { value: new THREE.Color(0xffd700) },
-        uColorMid2: { value: new THREE.Color(0xff8c00) },
-        uColorMid3: { value: new THREE.Color(0x8b0000) },
-        uColorOuter: { value: new THREE.Color(0x483d8b) },
-        uNoiseScale: { value: 4.0 },
-        uFlowSpeed: { value: 0.3 },
-        uDensity: { value: 1.5 },
-        uCameraPosition: { value: new THREE.Vector3() }
-      },
-      vertexShader: DiskShader.vertex,
-      fragmentShader: DiskShader.fragment,
-
-      // IMPORTANT FIXES
-      transparent: true,
-      side: THREE.DoubleSide,
-      depthWrite: false,
-      depthTest: false,   // 🔥 ADD THIS LINE
-      blending: THREE.AdditiveBlending
-    });
-
-    this.disk = new THREE.Mesh(diskGeo, this.diskMat);
-    this.disk.rotation.x = Math.PI / 3.5;
-    this.group.add(this.disk);
-  }
-
-  animate(time, cameraPos) {
-    const localCam = cameraPos.clone();
-    this.group.worldToLocal(localCam);
-    this.diskMat.uniforms.uTime.value = time;
-    this.diskMat.uniforms.uCameraPosition.value.copy(localCam);
-    this.ehMat.uniforms.uTime.value = time;
-    this.ehMat.uniforms.uCameraPosition.value.copy(localCam);
-    this.disk.rotation.z -= 0.005;
-  }
-}
-
-class Galaxy {
-  constructor(scene, config = {}) {
-    const particles = config.starCount || CONFIG.starCount;
-    const radius = config.radius || CONFIG.galaxyScale;
-    const position = config.position || new THREE.Vector3(0, 0, 0);
-    const rotation = config.rotation || new THREE.Euler(0, 0, 0);
-
-    const geometry = new THREE.BufferGeometry();
-    const positions = new Float32Array(particles * 3);
-    const colors = new Float32Array(particles * 3);
-
-    const colorCore = config.colorCore || new THREE.Color(0xffeebb);
-    const colorArmBlue = config.colorArmBlue || new THREE.Color(0xaaccff);
-    const colorArmPink = config.colorArmPink || new THREE.Color(0xff55aa);
-    const colorDust = config.colorDust || new THREE.Color(0x884444);
-
-    const arms = config.arms || 5;
-    const armWinding = config.winding || 2.5;
-
-    for (let i = 0; i < particles; i++) {
-      const i3 = i * 3;
-      let r;
-      const rand = Math.random();
-      let isRingParticle = false;
-      let isFillParticle = false;
-
-      if (config.hasRing && rand > 0.85) {
-        r = radius * 0.3 + (Math.random() - 0.5) * radius * 0.05;
-        isRingParticle = true;
-      } else {
-        r = Math.pow(Math.random(), 0.7) * radius;
-        if (Math.random() > 0.5) {
-          isFillParticle = true;
-        }
-      }
-
-      const angleOffset = armWinding * Math.log(r / 3000.0);
-      let finalAngle;
-
-      if (isFillParticle) {
-        finalAngle = Math.random() * Math.PI * 2;
-      } else {
-        const armIndex = i % arms;
-        const branchAngle = (armIndex / arms) * Math.PI * 2;
-        finalAngle = branchAngle + angleOffset;
-      }
-
-      const spread = (r / radius) * 6000 + 1000;
-      const randomX = (Math.random() - 0.5) * spread;
-      const randomZ = (Math.random() - 0.5) * spread;
-      const noiseAmp = r * 0.1;
-      const noiseX = (Math.random() - 0.5) * noiseAmp;
-      const noiseZ = (Math.random() - 0.5) * noiseAmp;
-
-      const x = r * Math.cos(finalAngle) + randomX + noiseX;
-      const z = r * Math.sin(finalAngle) + randomZ + noiseZ;
-      const thickness = (config.bulgeSize || 2500) * Math.exp(-r / (radius * 0.25)) + 300;
-      const y = (Math.random() - 0.5) * thickness;
-
-      positions[i3] = x;
-      positions[i3 + 1] = y;
-      positions[i3 + 2] = z;
-
-      const color = new THREE.Color();
-      if (isRingParticle) {
-        if (Math.random() > 0.3) color.setHex(0xaa44ff);
-        else color.setHex(0xff0066);
-      } else if (r < radius * 0.1) {
-        color.copy(colorCore);
-      } else if (isFillParticle) {
-        if (Math.random() > 0.6) color.copy(colorCore);
-        else color.copy(colorArmBlue).multiplyScalar(0.8);
-      } else {
-        const randC = Math.random();
-        if (randC > 0.4) color.copy(colorArmBlue);
-        else if (randC > 0.2) color.copy(colorDust);
-        else color.copy(colorArmPink);
-      }
-
-      color.offsetHSL(0, 0, (Math.random() - 0.5) * 0.2);
-      colors[i3] = color.r;
-      colors[i3 + 1] = color.g;
-      colors[i3 + 2] = color.b;
-    }
-
-    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-
-    const material = new THREE.PointsMaterial({
-      size: config.starSize || 150,
-      sizeAttenuation: true,
-      depthWrite: false,
-      vertexColors: true,
-      map: TextureFactory.getStarTexture(),
-      transparent: true,
-      opacity: 0.8,
-      onBeforeCompile: (shader) => {
-        shader.vertexShader = shader.vertexShader.replace(
-          'gl_PointSize = size;',
-          `
-        // clamp so stars don't grow into rectangles
-        gl_PointSize = clamp(size, 0.0, 8.0);
-      `
-        );
-
-        shader.fragmentShader = shader.fragmentShader.replace(
-          'gl_FragColor = vec4( outgoingLight, diffuseColor.a );',
-          `
-        // fade stars within ±100 units of solar system plane (y=0)
-        float fade = smoothstep(0.0, 100.0, abs(position.y));
-        gl_FragColor = vec4(outgoingLight, diffuseColor.a * fade);
-      `
-        );
-      }
-    });
-
-
-    this.mesh = new THREE.Points(geometry, material);
-    this.mesh.position.copy(position);
-    this.mesh.rotation.copy(rotation);
-    scene.add(this.mesh);
-
-    this.spriteMat = new THREE.SpriteMaterial({
-      map: TextureFactory.getGlowTexture(),
-      color: config.glowColor || 0xffaa55,
-      blending: THREE.AdditiveBlending,
-      opacity: config.glowOpacity || 0.4,
-      depthWrite: false
-    });
-    const sprite = new THREE.Sprite(this.spriteMat);
-    sprite.scale.set(radius * 0.4, radius * 0.25, 1);
-    this.mesh.add(sprite);
-  }
-}
+const groqApiKey = import.meta.env.VITE_GROQ_API_KEY;
 
 export default function App() {
   const mountRef = useRef(null);
@@ -623,6 +42,31 @@ export default function App() {
   const clockRef = useRef(new THREE.Clock());
   const pausedRef = useRef(paused);
 
+  // --- SHIP MODE STATE ---
+  const [shipMode, setShipMode] = useState(false);
+  const [activePopups, setActivePopups] = useState([]);
+  const [shipSpeed, setShipSpeed] = useState(0);
+  const shipRef = useRef(null);
+  const shipExhaustRef = useRef(null);
+  const shipVelocityRef = useRef(new THREE.Vector3());
+  const shipModeRef = useRef(false);
+  const keysRef = useRef(new Set());
+  const achievementsRef = useRef(new Set());
+  const joystickRef = useRef({ x: 0, y: 0, active: false });
+
+  // --- TESSERACT STATE ---
+  const [inTesseract, setInTesseract] = useState(false);
+  const inTesseractRef = useRef(false);
+  const tesseractRef = useRef(null);
+
+  // --- ANDROMEDA STATE ---
+  const andromedaGalaxyRef = useRef(null);
+  const andromedaBHRef = useRef(null);
+  const andromedaTesseractRef = useRef(null);
+  const inAndromedaRef = useRef(false);
+  const inAndromedaTesseractRef = useRef(false);
+  const [inAndromedaTesseract, setInAndromedaTesseract] = useState(false);
+
   // Chat Bot State
   const [showChat, setShowChat] = useState(false);
   const [chatInput, setChatInput] = useState("");
@@ -638,19 +82,26 @@ export default function App() {
     }
   }, [chatHistory, showChat]);
 
-  // --- GEMINI API INTEGRATION ---
-  const callGemini = async (prompt) => {
+  // --- GROQ API INTEGRATION ---
+  const callGroq = async (prompt) => {
     let attempts = 0;
     const maxAttempts = 3;
     const delays = [1000, 2000, 4000];
 
     while (attempts < maxAttempts) {
       try {
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`, {
+        if (!groqApiKey) throw new Error("Missing VITE_GROQ_API_KEY");
+
+        const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${groqApiKey}`
+          },
           body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }]
+            model: "llama-3.3-70b-versatile",
+            messages: [{ role: "user", content: prompt }],
+            temperature: 0.4
           })
         });
 
@@ -660,7 +111,7 @@ export default function App() {
         }
 
         const data = await response.json();
-        const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        const text = data.choices?.[0]?.message?.content;
         if (!text) throw new Error("Empty response");
         return text;
       } catch (err) {
@@ -671,18 +122,18 @@ export default function App() {
     }
   };
 
-  const fetchGeminiAnalysis = async (name, type) => {
+  const fetchAiAnalysis = async (name, type) => {
     if (!name) return;
     setIsAiLoading(true);
     setAiResponse("");
     const prompt = `You are a galactic historian. Provide a captivating, scientific summary (approx 60 words) of ${name} (${type}). Highlight its most unique feature (e.g., diamond rain, hexagon storm, subsurface ocean, golden record) and its significance to humanity.`;
 
     try {
-      const text = await callGemini(prompt);
+      const text = await callGroq(prompt);
       setAiResponse(text);
     } catch (error) {
       setAiResponse("Uplink Failed: Unable to establish connection with AI core.");
-      console.error("Gemini API Error:", error.message);
+      console.error("Groq API Error:", error.message);
     } finally {
       setIsAiLoading(false);
     }
@@ -700,9 +151,9 @@ export default function App() {
     const prompt = `You are Nexus, a knowledgeable and slightly poetic AI assistant on a spaceship traveling through the Milky Way. Answer the following question concisely (max 50 words) and scientifically: "${userMsg}". Context: We are in the Orion Spur, looking towards Sagittarius A*.`;
 
     try {
-      const text = await callGemini(prompt);
+      const text = await callGroq(prompt);
       setChatHistory(prev => [...prev, { role: 'bot', text: text }]);
-    } catch (error) {
+    } catch (_error) {
       setChatHistory(prev => [...prev, { role: 'bot', text: "Communication interference detected. Please try again." }]);
     } finally {
       setIsChatThinking(false);
@@ -808,8 +259,7 @@ export default function App() {
 
     // Make it face upwards (like a halo)
     sunGlow.rotation.x = Math.PI / 2;
-
-    scene.add(sunGlow);
+    solarSystemContainer.add(sunGlow);
 
     // sunGlow.scale.set(100, 100, 1);
     solarSystemContainer.add(sun);
@@ -950,13 +400,217 @@ export default function App() {
     solarSystemContainer.add(asteroids);
     asteroidsRef.current = asteroids;
 
-    // 8. Post Processing
+    // --- ALPHA CENTAURI SYSTEM ---
+    const alphaCentauriContainer = new THREE.Group();
+    alphaCentauriContainer.position.set(CONFIG.solarSystemDistance - 1800, 200, CONFIG.solarSystemDistance + 1200);
+    alphaCentauriContainer.rotation.set(THREE.MathUtils.degToRad(25), THREE.MathUtils.degToRad(-10), 0);
+    scene.add(alphaCentauriContainer);
+
+    const acStarAGeo = new THREE.SphereGeometry(6, CONFIG.geometrySegments, CONFIG.geometrySegments);
+    const acStarA = new THREE.Mesh(acStarAGeo, new THREE.MeshBasicMaterial({ map: TextureFactory.create('sun', '#fff4d6', '#ffcc44') }));
+    const acStarAGlow = new THREE.Sprite(new THREE.SpriteMaterial({ map: TextureFactory.getGlowTexture(), color: 0xffdd88, blending: THREE.AdditiveBlending, transparent: true, opacity: 0.6, depthWrite: false }));
+    acStarAGlow.scale.set(40, 40, 1);
+    acStarA.add(acStarAGlow);
+    acStarA.add(new THREE.PointLight(0xffdd88, 3, 3000));
+    alphaCentauriContainer.add(acStarA);
+    bodiesRef.current.push({ name: "Alpha Centauri A", type: "Star", mesh: acStarA, data: { desc: "A G2V main-sequence star nearly identical to the Sun but 1.1 times more massive and 1.5 times more luminous.", d: "4.37 ly", s: "21.7 km/s" } });
+
+    const acPivotB = new THREE.Object3D();
+    alphaCentauriContainer.add(acPivotB);
+    const acStarB = new THREE.Mesh(new THREE.SphereGeometry(4.5, CONFIG.geometrySegments, CONFIG.geometrySegments), new THREE.MeshBasicMaterial({ map: TextureFactory.create('sun', '#ffcc88', '#ee8833') }));
+    acStarB.position.x = 25;
+    const acStarBGlow = new THREE.Sprite(new THREE.SpriteMaterial({ map: TextureFactory.getGlowTexture(), color: 0xffaa44, blending: THREE.AdditiveBlending, transparent: true, opacity: 0.5, depthWrite: false }));
+    acStarBGlow.scale.set(30, 30, 1);
+    acStarB.add(acStarBGlow);
+    acStarB.add(new THREE.PointLight(0xffaa44, 2, 2000));
+    acPivotB.add(acStarB);
+    bodiesRef.current.push({ name: "Alpha Centauri B", type: "Star", mesh: acStarB, data: { desc: "A K1V orange dwarf, the secondary of the Alpha Centauri binary at 0.9 solar masses.", d: "4.37 ly", s: "21.7 km/s" } });
+
+    const acOrbitRing = new THREE.Mesh(new THREE.RingGeometry(24, 26, 64), new THREE.MeshBasicMaterial({ color: 0xffaa44, side: THREE.DoubleSide, transparent: true, opacity: 0.08 }));
+    acOrbitRing.rotation.x = Math.PI / 2;
+    alphaCentauriContainer.add(acOrbitRing);
+
+    const proximaPivot = new THREE.Object3D();
+    alphaCentauriContainer.add(proximaPivot);
+    const proximaStar = new THREE.Mesh(new THREE.SphereGeometry(1.5, CONFIG.geometrySegments, CONFIG.geometrySegments), new THREE.MeshBasicMaterial({ color: 0xff4422, emissive: 0x661100 }));
+    proximaStar.position.x = 120;
+    const proximaGlow = new THREE.Sprite(new THREE.SpriteMaterial({ map: TextureFactory.getGlowTexture(), color: 0xff3311, blending: THREE.AdditiveBlending, transparent: true, opacity: 0.4, depthWrite: false }));
+    proximaGlow.scale.set(12, 12, 1);
+    proximaStar.add(proximaGlow);
+    proximaStar.add(new THREE.PointLight(0xff4422, 1, 500));
+    proximaPivot.add(proximaStar);
+    bodiesRef.current.push({ name: "Proxima Centauri", type: "Red Dwarf", mesh: proximaStar, data: { desc: "The closest known star to the Sun at 4.2465 ly. Hosts Proxima Centauri b, a rocky exoplanet in the habitable zone.", d: "4.246 ly", s: "22.4 km/s" } });
+
+    const proxBPivot = new THREE.Object3D();
+    proximaStar.add(proxBPivot);
+    const proxBMesh = new THREE.Mesh(new THREE.SphereGeometry(0.6, CONFIG.geometrySegments, CONFIG.geometrySegments), new THREE.MeshStandardMaterial({ map: TextureFactory.create('rocky', '#5588cc', '#334466'), roughness: 0.7, metalness: 0.2 }));
+    proxBMesh.position.x = 5;
+    proxBPivot.add(proxBMesh);
+    bodiesRef.current.push({ name: "Proxima Centauri b", type: "Exoplanet", mesh: proxBMesh, pivot: proxBPivot, speed: 0.03, data: { desc: "A rocky exoplanet in the habitable zone of Proxima Centauri with 1.17 Earth masses.", d: "4.246 ly", s: "N/A" } });
+
+    // --- SPACESHIP ---
+    const shipGroup = new THREE.Group();
+    const hull = new THREE.Mesh(new THREE.ConeGeometry(3, 12, 4), new THREE.MeshStandardMaterial({ color: 0x00ddff, emissive: 0x004466, metalness: 0.8, roughness: 0.2 }));
+    hull.rotation.x = Math.PI / 2;
+    shipGroup.add(hull);
+    const wings = new THREE.Mesh(new THREE.BoxGeometry(16, 0.5, 6), new THREE.MeshStandardMaterial({ color: 0x0088aa, emissive: 0x003344, metalness: 0.7, roughness: 0.3 }));
+    wings.position.z = 2;
+    shipGroup.add(wings);
+    const engineLight = new THREE.PointLight(0x00ffff, 2, 300);
+    engineLight.position.z = 6;
+    shipGroup.add(engineLight);
+    const exhaust = new THREE.Mesh(new THREE.ConeGeometry(1.5, 8, 8), new THREE.MeshBasicMaterial({ color: 0x00ffff, transparent: true, opacity: 0.6, blending: THREE.AdditiveBlending }));
+    exhaust.rotation.x = -Math.PI / 2;
+    exhaust.position.z = 8;
+    shipGroup.add(exhaust);
+    shipExhaustRef.current = exhaust;
+    shipGroup.position.set(0, 100, CONFIG.solarSystemDistance + 400);
+    shipGroup.visible = false;
+    scene.add(shipGroup);
+    shipRef.current = shipGroup;
+
+    // --- TESSERACT DIMENSION ---
+    const tesseractGroup = new THREE.Group();
+    tesseractGroup.visible = false;
+    const cubeColors = [0xffaa44, 0xff6622, 0xffdd88];
+    const cubeSizes = [800, 1300, 1900];
+    const cubeRefs = [];
+    cubeSizes.forEach((size, i) => {
+      const edges = new THREE.EdgesGeometry(new THREE.BoxGeometry(size, size, size));
+      const wf = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: cubeColors[i], transparent: true, opacity: 0.5 - i * 0.12 }));
+      wf.position.z = -3000;
+      tesseractGroup.add(wf);
+      cubeRefs.push(wf);
+    });
+    for (let i = 0; i < 8; i++) {
+      const s = 250 + i * 120;
+      const edges = new THREE.EdgesGeometry(new THREE.BoxGeometry(s, s, s));
+      const wf = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0xffcc66, transparent: true, opacity: 0.18 }));
+      wf.position.set(0, 0, -800 - i * 800);
+      tesseractGroup.add(wf);
+      cubeRefs.push(wf);
+    }
+    const gridMat = new THREE.MeshBasicMaterial({ color: 0xffaa33, transparent: true, opacity: 0.06, wireframe: true, side: THREE.DoubleSide });
+    const floor = new THREE.Mesh(new THREE.PlaneGeometry(500, 8000, 30, 80), gridMat);
+    floor.rotation.x = -Math.PI / 2; floor.position.set(0, -250, -3000);
+    tesseractGroup.add(floor);
+    const ceiling = floor.clone(); ceiling.position.y = 250;
+    tesseractGroup.add(ceiling);
+    const leftWall = new THREE.Mesh(new THREE.PlaneGeometry(8000, 500, 80, 30), gridMat.clone());
+    leftWall.rotation.y = Math.PI / 2; leftWall.position.set(-250, 0, -3000);
+    tesseractGroup.add(leftWall);
+    const rightWall = leftWall.clone(); rightWall.position.x = 250;
+    tesseractGroup.add(rightWall);
+    const sliceCount = 500;
+    const sliceGeo = new THREE.BufferGeometry();
+    const slicePos = new Float32Array(sliceCount * 3);
+    const sliceCol = new Float32Array(sliceCount * 3);
+    for (let i = 0; i < sliceCount; i++) {
+      slicePos[i * 3] = (Math.random() - 0.5) * 480; slicePos[i * 3 + 1] = (Math.random() - 0.5) * 480; slicePos[i * 3 + 2] = Math.random() * -7000;
+      const c = new THREE.Color().setHSL(0.08 + Math.random() * 0.06, 0.9, 0.4 + Math.random() * 0.4);
+      sliceCol[i * 3] = c.r; sliceCol[i * 3 + 1] = c.g; sliceCol[i * 3 + 2] = c.b;
+    }
+    sliceGeo.setAttribute('position', new THREE.BufferAttribute(slicePos, 3));
+    sliceGeo.setAttribute('color', new THREE.BufferAttribute(sliceCol, 3));
+    tesseractGroup.add(new THREE.Points(sliceGeo, new THREE.PointsMaterial({ size: 14, vertexColors: true, transparent: true, opacity: 0.7, blending: THREE.AdditiveBlending, depthWrite: false, map: TextureFactory.getGlowTexture() })));
+    tesseractGroup.add(new THREE.AmbientLight(0xffaa44, 0.8));
+    const tL1 = new THREE.PointLight(0xffaa44, 5, 4000); tL1.position.set(0, 0, -1000); tesseractGroup.add(tL1);
+    const tL2 = new THREE.PointLight(0xff6622, 4, 4000); tL2.position.set(0, 0, -4000); tesseractGroup.add(tL2);
+    const tL3 = new THREE.PointLight(0xffcc44, 3, 3000); tL3.position.set(0, 0, -6000); tesseractGroup.add(tL3);
+    const exitPortal = new THREE.Mesh(new THREE.TorusGeometry(120, 12, 32, 64), new THREE.MeshBasicMaterial({ color: 0x4488ff, transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending }));
+    exitPortal.position.set(0, 0, -6000);
+    exitPortal.add(new THREE.Mesh(new THREE.TorusGeometry(120, 60, 16, 64), new THREE.MeshBasicMaterial({ color: 0x2266ff, transparent: true, opacity: 0.25, blending: THREE.AdditiveBlending })));
+    exitPortal.add(new THREE.PointLight(0x4488ff, 8, 1200));
+    tesseractGroup.add(exitPortal);
+    scene.add(tesseractGroup);
+    tesseractRef.current = { group: tesseractGroup, cubes: cubeRefs, portal: exitPortal };
+
+    // --- ANDROMEDA GALAXY ---
+    const ANDROMEDA_OFFSET = new THREE.Vector3(CONFIG.galaxyScale * 2.5, 5000, CONFIG.galaxyScale * 1.5);
+    andromedaGalaxyRef.current = new Galaxy(scene, {
+      position: ANDROMEDA_OFFSET.clone(),
+      radius: CONFIG.galaxyScale * 1.3,
+      arms: 7, winding: 3.0,
+      starCount: isMobile ? 30000 : 90000,
+      colorCore: new THREE.Color(0xbbddff),
+      colorArmBlue: new THREE.Color(0x6699ff),
+      colorArmPink: new THREE.Color(0xaa66ff),
+      colorDust: new THREE.Color(0x334488),
+      glowColor: 0x6699ff,
+      glowOpacity: 0.7,
+      starSize: 280,
+      bulgeSize: 3000
+    });
+    andromedaBHRef.current = new GargantuaBlackHole(scene, ANDROMEDA_OFFSET.clone(), 350);
+
+    // Inter-Galaxy Portal (Milky Way edge → Andromeda edge)
+    const mwPortalPos = new THREE.Vector3(CONFIG.galaxyScale * 0.9, 1000, CONFIG.galaxyScale * 0.5);
+    const igPortalGeo = new THREE.TorusGeometry(200, 20, 32, 64);
+    const mwPortal = new THREE.Mesh(igPortalGeo, new THREE.MeshBasicMaterial({ color: 0x8844ff, transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending }));
+    mwPortal.position.copy(mwPortalPos);
+    mwPortal.add(new THREE.Mesh(new THREE.TorusGeometry(200, 80, 16, 64), new THREE.MeshBasicMaterial({ color: 0x6622ff, transparent: true, opacity: 0.25, blending: THREE.AdditiveBlending })));
+    mwPortal.add(new THREE.PointLight(0x8844ff, 10, 2000));
+    scene.add(mwPortal);
+
+    // Return Portal (Andromeda edge → Milky Way edge)
+    const andReturnPos = ANDROMEDA_OFFSET.clone().add(new THREE.Vector3(-CONFIG.galaxyScale * 0.8, -1000, -CONFIG.galaxyScale * 0.4));
+    const andReturnPortal = new THREE.Mesh(igPortalGeo.clone(), new THREE.MeshBasicMaterial({ color: 0x44aaff, transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending }));
+    andReturnPortal.position.copy(andReturnPos);
+    andReturnPortal.add(new THREE.Mesh(new THREE.TorusGeometry(200, 80, 16, 64), new THREE.MeshBasicMaterial({ color: 0x2288ff, transparent: true, opacity: 0.25, blending: THREE.AdditiveBlending })));
+    andReturnPortal.add(new THREE.PointLight(0x44aaff, 10, 2000));
+    scene.add(andReturnPortal);
+
+    // Andromeda Tesseract (triggered by Andromeda's black hole)
+    const andTessGroup = new THREE.Group();
+    andTessGroup.visible = false;
+    const andCubeRefs = [];
+    [700, 1100, 1600].forEach((size, i) => {
+      const edges = new THREE.EdgesGeometry(new THREE.BoxGeometry(size, size, size));
+      const wf = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: [0x6699ff, 0x4466cc, 0x88bbff][i], transparent: true, opacity: 0.5 - i * 0.12 }));
+      wf.position.z = -2500;
+      andTessGroup.add(wf);
+      andCubeRefs.push(wf);
+    });
+    for (let i = 0; i < 6; i++) {
+      const s = 200 + i * 100;
+      const wf = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(s, s, s)), new THREE.LineBasicMaterial({ color: 0x6699ff, transparent: true, opacity: 0.15 }));
+      wf.position.set(0, 0, -600 - i * 700);
+      andTessGroup.add(wf);
+      andCubeRefs.push(wf);
+    }
+    const andGridMat = new THREE.MeshBasicMaterial({ color: 0x4488ff, transparent: true, opacity: 0.06, wireframe: true, side: THREE.DoubleSide });
+    const andFloor = new THREE.Mesh(new THREE.PlaneGeometry(450, 7000, 25, 70), andGridMat);
+    andFloor.rotation.x = -Math.PI / 2; andFloor.position.set(0, -220, -2500);
+    andTessGroup.add(andFloor);
+    const andCeiling = andFloor.clone(); andCeiling.position.y = 220;
+    andTessGroup.add(andCeiling);
+    andTessGroup.add(new THREE.AmbientLight(0x4488ff, 0.6));
+    const andTL = new THREE.PointLight(0x4488ff, 5, 4000); andTL.position.set(0, 0, -2000); andTessGroup.add(andTL);
+    const andExitPortal = new THREE.Mesh(new THREE.TorusGeometry(100, 10, 32, 64), new THREE.MeshBasicMaterial({ color: 0x44aaff, transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending }));
+    andExitPortal.position.set(0, 0, -5000);
+    andExitPortal.add(new THREE.Mesh(new THREE.TorusGeometry(100, 50, 16, 64), new THREE.MeshBasicMaterial({ color: 0x2266ff, transparent: true, opacity: 0.25, blending: THREE.AdditiveBlending })));
+    andExitPortal.add(new THREE.PointLight(0x44aaff, 8, 1200));
+    andTessGroup.add(andExitPortal);
+    scene.add(andTessGroup);
+    andromedaTesseractRef.current = { group: andTessGroup, cubes: andCubeRefs, portal: andExitPortal };
+
+    // --- KEYBOARD EVENTS ---
+    const onKeyDown = (e) => {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+      keysRef.current.add(e.key.toLowerCase());
+      if (['w', 'a', 's', 'd', 'f', 'z', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(e.key.toLowerCase())) e.preventDefault();
+    };
+    const onKeyUp = (e) => keysRef.current.delete(e.key.toLowerCase());
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+
+
     const composer = new EffectComposer(renderer);
     composer.addPass(new RenderPass(scene, camera));
 
     const bloomPass = new UnrealBloomPass(new THREE.Vector2(width, height), 1.5, 0.4, 0.85);
     bloomPass.threshold = 0.15;
-    bloomPass.strength = 1.0;
+    bloomPass.strength = 1.8;
     bloomPass.radius = 0.5;
     composer.addPass(bloomPass);
 
@@ -1009,10 +663,15 @@ export default function App() {
 
         solarSystemContainerRef.current.position.set(newX, 0, newZ);
 
-        // Move camera with the system
+        // Move camera with the system ONLY if it is tracking the solar system
         const delta = new THREE.Vector3().subVectors(solarSystemContainerRef.current.position, oldPos);
-        camera.position.add(delta);
-        controls.target.copy(solarSystemContainerRef.current.position);
+        if (!shipModeRef.current) {
+          const isTrackingSS = controls.target.distanceTo(solarSystemContainerRef.current.position) < 1;
+          if (isTrackingSS) {
+            camera.position.add(delta);
+            controls.target.copy(solarSystemContainerRef.current.position);
+          }
+        }
 
         // Local Solar System Physics
         bodiesRef.current.forEach(b => {
@@ -1023,6 +682,11 @@ export default function App() {
         });
 
         if (asteroidsRef.current) asteroidsRef.current.rotation.y += 0.0005;
+
+        // Alpha Centauri binary orbit
+        if (acPivotB) acPivotB.rotation.y += 0.01;
+        if (proximaPivot) proximaPivot.rotation.y += 0.002;
+        if (proxBPivot) proxBPivot.rotation.y += 0.04;
 
         // Update Trails (World Space conversion required)
         trailsRef.current.forEach(t => {
@@ -1042,6 +706,161 @@ export default function App() {
           t.mesh.geometry.setDrawRange(0, t.points.length);
         });
       }
+
+      // --- SHIP MOVEMENT ---
+      if (shipModeRef.current && shipRef.current) {
+        const ship = shipRef.current;
+        const keys = keysRef.current;
+        const joy = joystickRef.current;
+        const vel = shipVelocityRef.current;
+        const inTess = inTesseractRef.current;
+        const inAndTess = inAndromedaTesseractRef.current;
+        const isInAnyTesseract = inTess || inAndTess;
+        const spd = isInAnyTesseract ? 90 : 180;
+        const rotSpd = isInAnyTesseract ? 0.008 : 0.035;
+        const damp = 0.97;
+
+        let thrust = 0, yaw = 0, vertical = 0;
+        if (keys.has('w') || keys.has('arrowup')) thrust += 1;
+        if (keys.has('s') || keys.has('arrowdown')) thrust -= 1;
+        if (keys.has('a') || keys.has('arrowleft')) yaw += 1;
+        if (keys.has('d') || keys.has('arrowright')) yaw -= 1;
+        if (keys.has('f')) vertical += 1;
+        if (keys.has('z')) vertical -= 1;
+        if (joy.active) { thrust = -joy.y; yaw = -joy.x; }
+
+        if (isInAnyTesseract) {
+          vel.z += -thrust * spd;
+          vel.y += vertical * spd;
+          vel.x += -yaw * spd;
+          vel.x *= 0.85; vel.y *= 0.85;
+          ship.rotation.y += yaw * rotSpd;
+        } else {
+          ship.rotation.y += yaw * rotSpd;
+          const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(ship.quaternion);
+          const up = new THREE.Vector3(0, 1, 0).applyQuaternion(ship.quaternion);
+          vel.addScaledVector(fwd, thrust * spd);
+          vel.addScaledVector(up, vertical * spd);
+        }
+        vel.multiplyScalar(damp);
+        ship.position.add(vel.clone().multiplyScalar(0.016));
+
+        if (isInAnyTesseract) {
+          ship.position.x = THREE.MathUtils.clamp(ship.position.x, -240, 240);
+          ship.position.y = THREE.MathUtils.clamp(ship.position.y, -240, 240);
+          ship.position.z = THREE.MathUtils.clamp(ship.position.z, -6200, 1000);
+        }
+
+        const ex = shipExhaustRef.current;
+        if (ex) { ex.scale.z = 1 + Math.abs(thrust) * 2.5; ex.material.opacity = 0.2 + Math.abs(thrust) * 0.6; }
+        ship.children[2].intensity = 1 + Math.abs(thrust) * 5;
+
+        const camOff = new THREE.Vector3(0, 25, 70);
+        camOff.applyQuaternion(ship.quaternion);
+        camera.position.lerp(ship.position.clone().add(camOff), 0.035);
+        camera.lookAt(ship.position);
+        setShipSpeed(Math.round(vel.length()));
+
+        // --- ENTRY / EXIT LOGIC ---
+        const triggerAchievement = (id, name, desc) => {
+          if (!achievementsRef.current.has(id)) {
+            achievementsRef.current.add(id);
+            const pid = Date.now() + Math.random();
+            setActivePopups(prev => [...prev, { id: pid, name, desc }]);
+            setTimeout(() => setActivePopups(prev => prev.filter(p => p.id !== pid)), 4500);
+          }
+        };
+
+        if (!inTess && !inAndTess) {
+          // Sagittarius A* entry → MW Tesseract
+          if (ship.position.distanceTo(new THREE.Vector3(0, 0, 0)) < 2000) {
+            inTesseractRef.current = true; setInTesseract(true);
+            ship.position.set(0, 0, 800); ship.rotation.set(0, 0, 0); vel.set(0, 0, 0);
+            triggerAchievement('sagittarius', '🕳️ Event Horizon', 'You fell into Sagittarius A*! Find the exit portal...');
+          }
+          // Andromeda BH entry → Andromeda Tesseract
+          if (andromedaBHRef.current && ship.position.distanceTo(andromedaBHRef.current.group.position) < 2000) {
+            inAndromedaTesseractRef.current = true; setInAndromedaTesseract(true);
+            ship.position.set(0, 0, 800); ship.rotation.set(0, 0, 0); vel.set(0, 0, 0);
+            triggerAchievement('andromeda_rift', '🌀 Andromeda Rift', 'You fell into Andromeda\'s black hole!');
+          }
+          // Inter-galaxy portal: MW → Andromeda
+          if (ship.position.distanceTo(mwPortalPos) < 500) {
+            const andPos = ANDROMEDA_OFFSET.clone().add(new THREE.Vector3(-CONFIG.galaxyScale * 0.5, 0, -CONFIG.galaxyScale * 0.3));
+            ship.position.copy(andPos); vel.set(0, 0, 0);
+            inAndromedaRef.current = true;
+            triggerAchievement('intergalactic', '🌌 Intergalactic', 'You crossed the void between galaxies!');
+          }
+          // Return portal: Andromeda → MW
+          if (ship.position.distanceTo(andReturnPos) < 500) {
+            ship.position.set(CONFIG.galaxyScale * 0.7, 500, CONFIG.galaxyScale * 0.3); vel.set(0, 0, 0);
+            inAndromedaRef.current = false;
+          }
+          // Normal checkpoints
+          const checkpoints = [
+            { id: 'solar_system', pos: solarSystemContainerRef.current.position, radius: 500, name: '🌍 Homecoming', desc: 'You reached our Solar System!' },
+            { id: 'alpha_centauri', pos: new THREE.Vector3(CONFIG.solarSystemDistance - 1800, 200, CONFIG.solarSystemDistance + 1200), radius: 1000, name: '⭐ First Contact', desc: 'You reached the Alpha Centauri system!' },
+            { id: 'milky_way_outer', pos: new THREE.Vector3(0, 0, CONFIG.galaxyScale * 0.95), radius: 5000, name: '🌌 Edge Runner', desc: 'You reached the outer rim of the Milky Way!' }
+          ];
+          checkpoints.forEach(cp => {
+            if (!achievementsRef.current.has(cp.id) && ship.position.distanceTo(cp.pos) < cp.radius) {
+              triggerAchievement(cp.id, cp.name, cp.desc);
+            }
+          });
+        } else if (inTess) {
+          // MW Tesseract exit portal
+          if (tesseractRef.current && ship.position.distanceTo(tesseractRef.current.portal.position) < 400) {
+            inTesseractRef.current = false; setInTesseract(false);
+            const ssPos = solarSystemContainerRef.current.position;
+            ship.position.set(ssPos.x, ssPos.y + 100, ssPos.z + 400);
+            ship.rotation.set(0, 0, 0); vel.set(0, 0, 0);
+            triggerAchievement('tesseract_escape', '✨ Tesseract Escape', 'You escaped the 4th dimension!');
+          }
+        } else if (inAndTess) {
+          // Andromeda Tesseract exit portal
+          if (andromedaTesseractRef.current && ship.position.distanceTo(andromedaTesseractRef.current.portal.position) < 400) {
+            inAndromedaTesseractRef.current = false; setInAndromedaTesseract(false);
+            const andEdge = ANDROMEDA_OFFSET.clone().add(new THREE.Vector3(-CONFIG.galaxyScale * 0.5, 0, -CONFIG.galaxyScale * 0.3));
+            ship.position.copy(andEdge); ship.rotation.set(0, 0, 0); vel.set(0, 0, 0);
+            triggerAchievement('andromeda_escape', '💫 Andromeda Escape', 'You escaped Andromeda\'s rift!');
+          }
+        }
+      }
+
+      // --- TESSERACT ANIMATION ---
+      if (inTesseractRef.current && tesseractRef.current) {
+        const tess = tesseractRef.current;
+        tess.cubes[0].rotation.x = time * 0.3; tess.cubes[0].rotation.y = time * 0.2;
+        tess.cubes[1].rotation.y = time * 0.15; tess.cubes[1].rotation.z = time * 0.25;
+        tess.cubes[2].rotation.x = time * 0.1; tess.cubes[2].rotation.z = time * 0.18;
+        for (let i = 3; i < tess.cubes.length; i++) {
+          tess.cubes[i].rotation.x = time * (0.2 + i * 0.05);
+          tess.cubes[i].rotation.y = time * (0.15 + i * 0.03);
+        }
+        const pulse = Math.sin(time * 3) * 0.3 + 0.7;
+        tess.portal.material.opacity = pulse;
+        tess.portal.rotation.z = time * 0.5;
+        if (tess.portal.children[0]) tess.portal.children[0].material.opacity = pulse * 0.3;
+      }
+
+      // --- ANDROMEDA TESSERACT ANIMATION ---
+      if (inAndromedaTesseractRef.current && andromedaTesseractRef.current) {
+        const tess = andromedaTesseractRef.current;
+        tess.cubes.forEach((cube, i) => {
+          cube.rotation.x = time * (0.15 + i * 0.04);
+          cube.rotation.y = time * (0.1 + i * 0.03);
+        });
+        const pulse = Math.sin(time * 2.5) * 0.3 + 0.7;
+        tess.portal.material.opacity = pulse;
+        tess.portal.rotation.z = time * 0.4;
+      }
+
+      // Andromeda BH Animation
+      if (andromedaBHRef.current) andromedaBHRef.current.animate(time, camera.position);
+
+      // Portal rotation animation
+      if (mwPortal) mwPortal.rotation.z = time * 0.3;
+      if (andReturnPortal) andReturnPortal.rotation.z = -time * 0.3;
 
       // Gravitational Lensing Update
       const distSag = camera.position.distanceTo(sagARef.current.group.position);
@@ -1069,7 +888,11 @@ export default function App() {
         }
       });
 
-      controls.update();
+      // Tesseract visibility
+      if (tesseractRef.current) tesseractRef.current.group.visible = inTesseractRef.current;
+      if (andromedaTesseractRef.current) andromedaTesseractRef.current.group.visible = inAndromedaTesseractRef.current;
+
+      if (!shipModeRef.current) controls.update();
       composer.render();
     };
 
@@ -1090,6 +913,8 @@ export default function App() {
     return () => {
       cancelAnimationFrame(frameIdRef.current);
       window.removeEventListener('resize', handleResize);
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
       if (mountNode && renderer.domElement) {
         mountNode.removeChild(renderer.domElement);
       }
@@ -1108,6 +933,33 @@ export default function App() {
       });
     }
   }, [paused]);
+
+  useEffect(() => {
+    shipModeRef.current = shipMode;
+    if (shipRef.current) shipRef.current.visible = shipMode;
+    if (controlsRef.current) controlsRef.current.enabled = !shipMode;
+    if (shipMode && shipRef.current) {
+      shipVelocityRef.current.set(0, 0, 0);
+    }
+  }, [shipMode]);
+
+  useEffect(() => {
+    inTesseractRef.current = inTesseract;
+    if (inTesseract && shipRef.current) {
+      shipRef.current.position.set(0, 0, 800);
+      shipRef.current.rotation.set(0, 0, 0);
+      shipVelocityRef.current.set(0, 0, 0);
+    }
+  }, [inTesseract]);
+
+  useEffect(() => {
+    inAndromedaTesseractRef.current = inAndromedaTesseract;
+    if (inAndromedaTesseract && shipRef.current) {
+      shipRef.current.position.set(0, 0, 800);
+      shipRef.current.rotation.set(0, 0, 0);
+      shipVelocityRef.current.set(0, 0, 0);
+    }
+  }, [inAndromedaTesseract]);
 
   const handleCanvasClick = (e) => {
     const raycaster = new THREE.Raycaster();
@@ -1178,6 +1030,31 @@ export default function App() {
     }
   };
 
+  const jumpToAndromeda = () => {
+    if (cameraRef.current && controlsRef.current && andromedaGalaxyRef.current) {
+      const andPos = andromedaGalaxyRef.current.mesh.position;
+      cameraRef.current.position.set(andPos.x, andPos.y + 40000, andPos.z + 80000);
+      controlsRef.current.target.copy(andPos);
+      setSelectedBody({
+        name: "Andromeda Galaxy (M31)",
+        type: "Barred Spiral Galaxy",
+        data: {
+          desc: "The nearest large galaxy to the Milky Way, containing approximately 1 trillion stars. It will collide with our galaxy in about 4.5 billion years.",
+          d: "2.537M LY",
+          s: "-301 km/s (Approaching)"
+        }
+      });
+    }
+  };
+
+  const jumpToAlphaCentauri = () => {
+    if (cameraRef.current && controlsRef.current) {
+      const acPos = new THREE.Vector3(CONFIG.solarSystemDistance - 1800, 200, CONFIG.solarSystemDistance + 1200);
+      cameraRef.current.position.set(acPos.x, acPos.y + 100, acPos.z + 250);
+      controlsRef.current.target.copy(acPos);
+    }
+  };
+
   return (
     <div className="w-full h-screen bg-black overflow-hidden relative font-sans text-white select-none">
       <div ref={mountRef} onClick={handleCanvasClick} className="w-full h-full cursor-crosshair" />
@@ -1208,42 +1085,119 @@ export default function App() {
       </div>
 
       {/* CONTROLS */}
-      <div className="absolute bottom-8 left-1/2 -translate-x-1/2 flex items-center gap-6 bg-black/60 backdrop-blur-xl px-8 py-4 rounded-full border border-white/10 shadow-2xl z-10 w-[90%] md:w-auto justify-center max-w-2xl">
+      <div className="absolute bottom-8 left-1/2 -translate-x-1/2 flex items-center gap-4 bg-black/60 backdrop-blur-xl px-6 py-3 rounded-full border border-white/10 shadow-2xl z-10 w-[95%] md:w-auto justify-center max-w-4xl flex-wrap md:flex-nowrap">
         <button
           onClick={() => setPaused(!paused)}
-          className={`flex items-center gap-2 px-5 py-2 rounded-full text-[10px] font-bold tracking-widest transition-all shadow-lg border ${paused ? 'bg-amber-500 border-amber-400 text-black hover:bg-amber-400' : 'bg-white/5 border-white/20 text-white hover:bg-cyan-500 hover:text-black hover:border-cyan-400'}`}
+          className={`flex items-center gap-2 px-4 py-2 rounded-full text-[10px] font-bold tracking-widest transition-all shadow-lg border ${paused ? 'bg-amber-500 border-amber-400 text-black hover:bg-amber-400' : 'bg-white/5 border-white/20 text-white hover:bg-cyan-500 hover:text-black hover:border-cyan-400'}`}
         >
           {paused ? <Play size={12} fill="currentColor" /> : <Pause size={12} fill="currentColor" />}
           {paused ? "RESUME" : "PAUSE"}
         </button>
 
-        <button
-          onClick={jumpToSolarSystem}
-          className="p-2.5 rounded-full bg-white/5 border border-white/20 hover:bg-white/20 text-gray-300 hover:text-white transition-all flex items-center gap-2"
-          title="Solar System"
-        >
-          <RotateCcw size={14} />
-          <span className="text-[10px] hidden md:inline">SOLAR SYSTEM</span>
+        <button onClick={jumpToSolarSystem} className="p-2 rounded-full bg-white/5 border border-white/20 hover:bg-white/20 text-gray-300 hover:text-white transition-all flex items-center gap-1.5" title="Solar System">
+          <RotateCcw size={13} /><span className="text-[9px] hidden md:inline">SOLAR</span>
+        </button>
+
+        <button onClick={jumpToAlphaCentauri} className="p-2 rounded-full bg-white/5 border border-white/20 hover:bg-orange-500/20 text-gray-300 hover:text-orange-300 transition-all flex items-center gap-1.5" title="Alpha Centauri">
+          <Sparkles size={13} /><span className="text-[9px] hidden md:inline">α CEN</span>
+        </button>
+
+        <button onClick={jumpToSagittarius} className="p-2 rounded-full bg-white/5 border border-white/20 hover:bg-white/20 text-gray-300 hover:text-white transition-all flex items-center gap-1.5" title="Sagittarius A*">
+          <MapPin size={13} /><span className="text-[9px] hidden md:inline">SAG A*</span>
+        </button>
+
+        <button onClick={jumpToGalaxy} className="p-2 rounded-full bg-white/5 border border-white/20 hover:bg-white/20 text-gray-300 hover:text-white transition-all flex items-center gap-1.5" title="Milky Way">
+          <Sparkles size={13} /><span className="text-[9px] hidden md:inline">MW</span>
+        </button>
+
+        <button onClick={jumpToAndromeda} className="p-2 rounded-full bg-white/5 border border-indigo-500/30 hover:bg-indigo-500/20 text-indigo-300 hover:text-indigo-200 transition-all flex items-center gap-1.5" title="Andromeda Galaxy">
+          <Sparkles size={13} /><span className="text-[9px] hidden md:inline">M31</span>
         </button>
 
         <button
-          onClick={jumpToSagittarius}
-          className="p-2.5 rounded-full bg-white/5 border border-white/20 hover:bg-white/20 text-gray-300 hover:text-white transition-all flex items-center gap-2"
-          title="Sagittarius A*"
+          onClick={() => setShipMode(!shipMode)}
+          className={`flex items-center gap-2 px-4 py-2 rounded-full text-[10px] font-bold tracking-widest transition-all shadow-lg border ${shipMode ? 'bg-cyan-500 border-cyan-400 text-black hover:bg-cyan-400' : 'bg-white/5 border-cyan-500/30 text-cyan-300 hover:bg-cyan-500/20 hover:border-cyan-400'}`}
         >
-          <MapPin size={14} />
-          <span className="text-[10px] hidden md:inline">SAGITTARIUS</span>
-        </button>
-
-        <button
-          onClick={jumpToGalaxy}
-          className="p-2.5 rounded-full bg-white/5 border border-white/20 hover:bg-white/20 text-gray-300 hover:text-white transition-all flex items-center gap-2"
-          title="Milky Way Galaxy"
-        >
-          <Sparkles size={14} />
-          <span className="text-[10px] hidden md:inline">MILKY WAY</span>
+          <Rocket size={12} />
+          {shipMode ? "EXIT SHIP" : "FLY"}
         </button>
       </div>
+
+      {/* SHIP HUD */}
+      {shipMode && (
+        <div className="absolute top-6 right-6 z-20 space-y-2 pointer-events-none">
+          <div className="bg-black/70 backdrop-blur border border-cyan-500/30 px-4 py-3 rounded-lg relative overflow-hidden">
+            <div className="hud-scanline" />
+            <div className="text-[9px] text-cyan-400 tracking-widest mb-1">VELOCITY</div>
+            <div className="text-2xl font-mono text-white">{shipSpeed} <span className="text-[10px] text-cyan-400">u/s</span></div>
+          </div>
+          {(inTesseract || inAndromedaTesseract) && (
+            <div className="bg-black/70 backdrop-blur border border-amber-500/30 px-4 py-2 rounded-lg">
+              <div className="text-[9px] text-amber-400 tracking-widest animate-pulse">
+                {inTesseract ? '⚡ TESSERACT DIMENSION' : '🌀 ANDROMEDA RIFT'}
+              </div>
+              <div className="text-[9px] text-amber-200 mt-1">Fly to the exit portal (blue ring) →</div>
+            </div>
+          )}
+          <div className="bg-black/70 backdrop-blur border border-white/10 px-4 py-2 rounded-lg relative overflow-hidden">
+            <div className="hud-scanline" style={{ animationDuration: '6s' }} />
+            <div className="text-[9px] text-gray-400">W/S or ↑↓ = Forward/Back</div>
+            <div className="text-[9px] text-gray-400">A/D or ←→ = Yaw Turn</div>
+            <div className="text-[9px] text-cyan-400 font-bold">F / Z = Up / Down</div>
+          </div>
+        </div>
+      )}
+
+      {/* ACHIEVEMENT POPUPS */}
+      <div className="fixed top-20 left-1/2 -translate-x-1/2 z-50 space-y-3 pointer-events-none">
+        {activePopups.map(p => (
+          <div key={p.id} className="bg-gradient-to-r from-amber-900/90 to-orange-900/90 backdrop-blur-xl border border-amber-500/50 px-6 py-3 rounded-lg shadow-[0_0_30px_rgba(255,170,0,0.4)] animate-[fadeInUp_0.5s_ease-out] flex items-center gap-3">
+            <Trophy size={18} className="text-amber-400" />
+            <div>
+              <div className="text-sm font-bold text-amber-100">{p.name}</div>
+              <div className="text-[10px] text-amber-300">{p.desc}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* MOBILE JOYSTICK */}
+      {shipMode && isMobile && (
+        <div className="fixed bottom-28 right-8 z-40 flex flex-col items-center gap-6">
+          <div className="flex flex-col gap-4">
+            <button
+              onTouchStart={() => keysRef.current.add('f')}
+              onTouchEnd={() => keysRef.current.delete('f')}
+              className="w-14 h-14 rounded-full bg-cyan-500/20 border-2 border-cyan-400 flex items-center justify-center text-cyan-400 active:bg-cyan-500 active:text-black transition-colors"
+            >
+              <span className="font-bold text-lg">UP</span>
+            </button>
+            <button
+              onTouchStart={() => keysRef.current.add('z')}
+              onTouchEnd={() => keysRef.current.delete('z')}
+              className="w-14 h-14 rounded-full bg-cyan-500/20 border-2 border-cyan-400 flex items-center justify-center text-cyan-400 active:bg-cyan-500 active:text-black transition-colors"
+            >
+              <span className="font-bold text-lg">DN</span>
+            </button>
+          </div>
+
+          <div
+            className="w-28 h-28 rounded-full bg-white/10 border-2 border-cyan-500/40 flex items-center justify-center relative"
+            onTouchStart={(e) => { e.preventDefault(); joystickRef.current.active = true; }}
+            onTouchMove={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              const cx = rect.left + rect.width / 2;
+              const cy = rect.top + rect.height / 2;
+              const touch = e.touches[0];
+              joystickRef.current.x = THREE.MathUtils.clamp((touch.clientX - cx) / (rect.width / 2), -1, 1);
+              joystickRef.current.y = THREE.MathUtils.clamp((touch.clientY - cy) / (rect.height / 2), -1, 1);
+            }}
+            onTouchEnd={() => { joystickRef.current = { x: 0, y: 0, active: false }; }}
+          >
+            <div className="w-10 h-10 rounded-full bg-cyan-400/50 border border-cyan-300 pointer-events-none" />
+          </div>
+        </div>
+      )}
 
       {/* SPACE BOT CHAT INTERFACE */}
       <div className="absolute bottom-6 left-6 z-30 flex flex-col items-start gap-4">
@@ -1368,7 +1322,7 @@ export default function App() {
             <div className="mt-auto">
               {!aiResponse && !isAiLoading && (
                 <button
-                  onClick={() => fetchGeminiAnalysis(selectedBody.name, selectedBody.type)}
+                  onClick={() => fetchAiAnalysis(selectedBody.name, selectedBody.type)}
                   className="w-full py-3 rounded-sm bg-gradient-to-r from-indigo-900/50 to-purple-900/50 border border-indigo-500/30 hover:border-indigo-400 text-indigo-200 text-[10px] font-bold tracking-[2px] flex items-center justify-center gap-2 transition-all hover:shadow-[0_0_20px_rgba(99,102,241,0.3)] group"
                 >
                   <Sparkles size={12} className="text-indigo-400 group-hover:text-white transition-colors" />
@@ -1432,3 +1386,6 @@ export default function App() {
     </div>
   );
 }
+
+
+
